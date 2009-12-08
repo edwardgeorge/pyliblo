@@ -78,6 +78,7 @@ cdef extern from 'lo/lo.h':
     lo_method lo_server_add_method(lo_server s, char *path, char *typespec, lo_method_handler h, void *user_data)
     int lo_server_recv(lo_server s) nogil
     int lo_server_recv_noblock(lo_server s, int timeout) nogil
+    int lo_server_get_socket_fd(lo_server s)
 
     # server thread
     lo_server_thread lo_server_thread_new_with_proto(char *port, int proto, lo_err_handler err_h)
@@ -412,6 +413,9 @@ cdef class Server(_ServerBase):
             with nogil:
                 lo_server_recv(self._serv)
             return True
+
+    def fileno(self):
+        return lo_server_get_socket_fd(self._serv)
 
 
 cdef class ServerThread(_ServerBase):
