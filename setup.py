@@ -38,6 +38,7 @@ ext_modules = [
         extra_compile_args = [
             '-fno-strict-aliasing',
             '-Werror-implicit-function-declaration',
+            '-Wfatal-errors',
         ],
         libraries = ['lo']
     )
@@ -66,7 +67,7 @@ else:
 
 setup (
     name = 'pyliblo',
-    version = '0.9.0-pre1',
+    version = '0.9.0',
     author = 'Dominic Sacre',
     author_email = 'dominic.sacre@gmx.de',
     url = 'http://das.nasophon.de/pyliblo/',

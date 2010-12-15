@@ -58,7 +58,6 @@ cdef extern from 'lo/lo.h':
         lo_timetag t
 
     cdef enum:
-        LO_DEFAULT
         LO_UDP
         LO_UNIX
         LO_TCP
@@ -79,6 +78,7 @@ cdef extern from 'lo/lo.h':
     lo_method lo_server_add_method(lo_server s, char *path, char *typespec, lo_method_handler h, void *user_data)
     int lo_server_recv(lo_server s) nogil
     int lo_server_recv_noblock(lo_server s, int timeout) nogil
+    int lo_server_get_socket_fd(lo_server s)
 
     # server thread
     lo_server_thread lo_server_thread_new_with_proto(char *port, int proto, lo_err_handler err_h)
@@ -188,6 +188,11 @@ cdef double _timetag_to_double(lo_timetag tt):
     return <double>tt.sec + (<double>(tt.frac) / 4294967296.0)
 
 def time():
+    """
+    time()
+
+    Returns the current time as a float in OSC format, that is, the number of seconds since the epoch (January 1, 1900).
+    """
     cdef lo_timetag tt
     lo_timetag_now(&tt)
     return _timetag_to_double(tt)
@@ -225,6 +230,15 @@ def _send(target, src, *msg):
 
 
 def send(target, *msg):
+    """
+    send(target, message)
+    send(target, bundle)
+    send(target, path[, arg, ...])
+
+    Sends a message or bundle to the the given target, without requiring a server.
+    target may be an Address object, a port number, a (hostname, port) tuple, or a URL.
+    Exceptions: AddressError
+    """
     _send(target, None, *msg)
 
 
@@ -323,6 +337,12 @@ cdef void _err_handler(int num, const_char_ptr msg, const_char_ptr where) with g
 # decorator to register callbacks
 
 class make_method:
+    """
+    @make_method(path, typespec[, user_data])
+
+    Decorator that basically serves the same purpose as add_method(). Decorators require Python 2.4 or later.
+    Note that @make_method is defined at module scope, and not a member of class Server.
+    """
     # counter to keep track of the order in which the callback functions where defined
     _counter = 0
 
@@ -352,6 +372,12 @@ cdef class _ServerBase:
             self.register_methods()
 
     def register_methods(self, obj=None):
+        """
+        register_methods([obj])
+
+        Calls add_method() for all methods of obj decorated with @make_method. obj defaults to the Server object itself.
+        This function is called automatically by the Server's init function, unless its reg_methods parameter is False.
+        """
         if obj == None:
             obj = self
         # find and register methods that were defined using decorators
@@ -367,6 +393,7 @@ cdef class _ServerBase:
 
     def get_url(self):
         cdef char *tmp
+        cdef object r
         tmp = lo_server_get_url(self._serv)
         r = tmp
         free(tmp)
@@ -378,7 +405,23 @@ cdef class _ServerBase:
     def get_protocol(self):
         return lo_server_get_protocol(self._serv)
 
+    def fileno(self):
+        """
+        fileno()
+
+        Returns the file descriptor of the server socket, or -1 if not supported by the underlying server protocol.
+        """
+        return lo_server_get_socket_fd(self._serv)
+
     def add_method(self, path, typespec, func, user_data=None):
+        """
+        add_method(path, typespec, callback_func[, user_data])
+
+        Registers a callback function for OSC messages with matching path and argument types.
+        For both path and typespec, None may be used as a wildcard.
+        The optional user_data will be passed on to the callback function. callback_func may be a global
+        function or a class method, pyliblo will know what to do either way.
+        """
         cdef char *p
         cdef char *t
 
@@ -409,23 +452,51 @@ cdef class _ServerBase:
         lo_server_add_method(self._serv, p, t, _callback, <void*>cb)
 
     def send(self, target, *msg):
+        """
+        send(target, message)
+        send(target, bundle)
+        send(target, path[, arg, ...])
+
+        Sends a message or bundle from this server to the the given target.
+        target may be an Address object, a port number, a (hostname, port) tuple, or a URL.
+        Exceptions: AddressError
+        """
         _send(target, self, *msg)
 
     property url:
+        """
+        The server's URL.
+        """
         def __get__(self):
             return self.get_url()
 
     property port:
+        """
+        The server's port number.
+        """
         def __get__(self):
             return self.get_port()
 
     property protocol:
+        """
+        The server's protocol (one of the constants UDP, TCP, UNIX).
+        """
         def __get__(self):
             return self.get_protocol()
 
 
 cdef class Server(_ServerBase):
-    def __init__(self, port=None, proto=LO_DEFAULT, **kwargs):
+    """
+    Server([port[, proto[, **kwargs]]])
+
+    Creates a new Server object, which can receive OSC messages.
+    port may be a decimal port number or a UNIX socket path. If omitted, an arbitrary free UDP port will be used.
+    proto can be one of the constants UDP, TCP, UNIX.
+    Optional keyword arguments:
+    reg_methods: False if you don't want the init function to automatically register callbacks defined with the @make_method decorator.
+    Exceptions: ServerError
+    """
+    def __init__(self, port=None, proto=LO_UDP, **kwargs):
         cdef char *cs
 
         if port != None:
@@ -446,11 +517,22 @@ cdef class Server(_ServerBase):
         self.free()
 
     def free(self):
+        """
+        free()
+
+        Frees the underlying server object and closes its port. Note that this will also happen automatically when the server is garbage-collected.
+        """
         if self._serv:
             lo_server_free(self._serv)
             self._serv = NULL
 
     def recv(self, timeout=None):
+        """
+        recv([timeout])
+
+        Receives and dispatches one OSC message. Blocking by default, unless timeout (in ms) is specified.
+        timeout may be 0, in which case recv() returns immediately. Returns True if a message was received, False otherwise. 
+        """
         cdef int t, r
         if timeout != None:
             t = timeout
@@ -464,9 +546,20 @@ cdef class Server(_ServerBase):
 
 
 cdef class ServerThread(_ServerBase):
+    """
+    ServerThread([port[, proto[, **kwargs]]])
+
+    Creates a new ServerThread object, which can receive OSC messages.  Unlike Server, ServerThread uses its own thread
+    which runs in the background to dispatch messages.  Note that callback methods will not be run in the main Python thread!
+    port may be a decimal port number or a UNIX socket path. If omitted, an arbitrary free UDP port will be used.
+    proto can be one of the constants UDP, TCP, UNIX.
+    Optional keyword arguments:
+    reg_methods: False if you don't want the init function to automatically register callbacks defined with the @make_method decorator.
+    Exceptions: ServerError
+    """
     cdef lo_server_thread _thread
 
-    def __init__(self, port=None, proto=LO_DEFAULT, **kwargs):
+    def __init__(self, port=None, proto=LO_UDP, **kwargs):
         cdef char *cs
 
         if port != None:
@@ -491,15 +584,30 @@ cdef class ServerThread(_ServerBase):
         self.free()
 
     def free(self):
+        """
+        free()
+
+        Frees the underlying server object and closes its port. Note that this will also happen automatically when the server is garbage-collected.
+        """
         if self._thread:
             lo_server_thread_free(self._thread)
             self._thread = NULL
             self._serv = NULL
 
     def start(self):
+        """
+        start()
+
+        Starts the server thread, liblo will now start to dispatch any messages it receives.
+        """
         lo_server_thread_start(self._thread)
 
     def stop(self):
+        """
+        stop()
+
+        Stops the server thread.
+        """
         lo_server_thread_stop(self._thread)
 
 
@@ -515,9 +623,17 @@ class AddressError(Exception):
 
 
 cdef class Address:
+    """
+    Address(hostname, port[, proto])
+    Address(port)
+    Address(url)
+
+    Creates a new Address object from the given hostname/port or URL.
+    Exceptions: AddressError
+    """
     cdef lo_address _addr
 
-    def __init__(self, addr, addr2=None, proto=LO_DEFAULT):
+    def __init__(self, addr, addr2=None, proto=LO_UDP):
         if addr2:
             # Address(host, port[, proto])
             s = _encode(addr)
@@ -542,6 +658,7 @@ cdef class Address:
 
     def get_url(self):
         cdef char *tmp
+        cdef object r
         tmp = lo_address_get_url(self._addr)
         r = tmp
         free(tmp)
@@ -561,18 +678,30 @@ cdef class Address:
         return lo_address_get_protocol(self._addr)
 
     property url:
+        """
+        The address' URL.
+        """
         def __get__(self):
             return self.get_url()
 
     property hostname:
+        """
+        The address' hostname.
+        """
         def __get__(self):
             return self.get_hostname()
 
     property port:
+        """
+        The address' port number.
+        """
         def __get__(self):
             return self.get_port()
 
     property protocol:
+        """
+        The address' protocol (one of the constants UDP, TCP, UNIX).
+        """
         def __get__(self):
             return self.get_protocol()
 
@@ -611,6 +740,11 @@ cdef class _Blob:
 
 
 cdef class Message:
+    """
+    Message(path[, arg, ...])
+
+    Creates a new Message object.
+    """
     cdef bytes _path
     cdef lo_message _msg
     cdef list _keep_refs
@@ -627,6 +761,11 @@ cdef class Message:
         lo_message_free(self._msg)
 
     def add(self, *args):
+        """
+        add(arg[, ...])
+
+        Appends the given argument(s) to the message.
+        """
         for arg in args:
             if isinstance(arg, tuple) and len(arg) <= 2 and isinstance(arg[0], (bytes, unicode)) and len(arg[0]) == 1:
                 # type explicitly specified
@@ -714,6 +853,12 @@ cdef class Message:
 ################################################################################################
 
 cdef class Bundle:
+    """
+    Bundle([timetag, ][message, ...])
+
+    Creates a new Bundle object. You can optionally specify a time at which the messages should be dispatched
+    (as an OSC timetag float), and any number of messages to be included in the bundle.
+    """
     cdef lo_bundle _bundle
     cdef list _keep_refs
 
@@ -741,6 +886,12 @@ cdef class Bundle:
         lo_bundle_free(self._bundle)
 
     def add(self, *msgs):
+        """
+        add(message[, ...])
+        add(path[, arg, ...])
+
+        Adds one or more messages to the bundle.
+        """
         if isinstance(msgs[0], Message):
             # arguments are message objects
             for m in msgs:
